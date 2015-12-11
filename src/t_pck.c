@@ -13,40 +13,170 @@
 #include <string.h>               // memset
 
 #include "t.h"
+#include "t_pck.h"
 #include "t_buf.h"
-
-// ========== Buffer accessor Helpers
-
-/* number of bits in a character */
-#define NB                 CHAR_BIT
-
-/* mask for one character (NB 1's) */
-#define MC                 ((1 << NB) - 1)
-
-/* size of a lua_Integer */
-#define MXINT              ((int)sizeof(lua_Integer))
-
-// Maximum bits that can be read or written
-#define MXBIT              MXINT * NB
-
-// Macro helpers
-#define BIT_GET(b,n)       ( ((b) >> (NB-(n))) & 0x01 )
-#define BIT_SET(b,n,v)     \
-	( (1==v)              ? \
-	 ((b) | (  (0x01) << (NB-(n))))    : \
-	 ((b) & (~((0x01) << (NB-(n))))) )
-
 
 
 // global default for T.Pack, can be flipped
 #ifdef IS_LITTLE_ENDIAN
-static int _default_endian = 1;
+static int _default_endian = LITTLE_ENDIAN;
 #else
-static int _default_endian = 0;
+static int _default_endian = BIG_ENDIAN;
 #endif
 
 // Declaration because of circular dependency
 static struct t_pck *t_pck_mksequence( lua_State *L, int sp, int ep, size_t *bo );
+
+
+// ###########################################################################
+//                Format string parsing helpers adapted from Lua 5.3 Source
+/** -------------------------------------------------------------------------
+ * See if int represents a character which is a digit.
+ * \param     int c
+ * \return    boolean 0:flase - 1:true
+ *  -------------------------------------------------------------------------*/
+static int
+is_digit( int c ) { return '0' <= c && c<='9'; }
+
+
+/** -------------------------------------------------------------------------
+ * reads from string until input is not numeric any more.
+ * \param     char** format string
+ * \param     int    default value
+ * \return    int    read numeric value
+ *  -------------------------------------------------------------------------*/
+static int
+gn( const char **fmt, int df )
+{
+	if (! is_digit( **fmt ))    // no number
+		return df;
+	else
+	{
+		int a=0;
+		do
+		{
+			a = a * 10 + * ((*fmt)++) - '0';
+		} while (is_digit( **fmt ) &&  a <(INT_MAX/10 - 10));
+		return a;
+	}
+}
+
+
+/** -------------------------------------------------------------------------
+ * Read an integer from the format parser
+ * raises an error if it is larger than the maximum size for integers.
+ * \param  char* format string
+ * \param  int   default value if no number is in the format string
+ * \param  int   max value allowed for int
+ * \return the converted integer value
+ *  -------------------------------------------------------------------------*/
+static int
+gnl( lua_State *L, const char **fmt, int df, int max )
+{
+	int sz = gn( fmt, df );
+	if (sz > max || sz <= 0)
+		luaL_error( L, "size (%d) out of limits [1,%d]", sz, max );
+	return sz;
+}
+
+
+/** -------------------------------------------------------------------------
+ * Determines type of Packer from format string.
+ * Returns the Packer, or NULL if unsuccessful.
+ * \param     L  lua state.
+ * \param     char*  format string pointer. moved by this function.
+ * \param     int*   e pointer to current endianess.
+ * \param     int*   bo pointer to current bit offset within byte.
+ * \return    struct t_pck* pointer.
+ * TODO: Deal with bit sized Packers:
+ *       - Detect if we are in Bit sized type(o%8 !=0)
+ *       - Detect if fmt switched back to byte style and ERROR
+ *  -------------------------------------------------------------------------*/
+static struct t_pck
+*t_pck_get_packer_definition_from_string( lua_State *L, const char **f, int *e, size_t *bo )
+{
+	int           opt;
+	int           m;
+	size_t        s;
+	enum t_pck_t  t;
+	struct t_pck *p   = NULL;
+
+	while (NULL == p)
+	{
+		opt = *((*f)++);
+		//printf("'%c'   %02X\n", opt, opt);
+		switch (opt)
+		{
+			// Integer types
+			case 'b': t = T_PCK_INT;   m = (1==*e);   s = 1;                                 break;
+			case 'B': t = T_PCK_UNT;   m = (1==*e);   s = 1;                                 break;
+			case 'h': t = T_PCK_INT;   m = (1==*e);   s = sizeof( short );                   break;
+			case 'H': t = T_PCK_UNT;   m = (1==*e);   s = sizeof( short );                   break;
+			case 'l': t = T_PCK_INT;   m = (1==*e);   s = sizeof( long );                    break;
+			case 'L': t = T_PCK_UNT;   m = (1==*e);   s = sizeof( long );                    break;
+			case 'j': t = T_PCK_INT;   m = (1==*e);   s = sizeof( lua_Integer );             break;
+			case 'J': t = T_PCK_UNT;   m = (1==*e);   s = sizeof( lua_Integer );             break;
+			case 'T': t = T_PCK_INT;   m = (1==*e);   s = sizeof( size_t );                  break;
+			case 'i': t = T_PCK_INT;   m = (1==*e);   s = gnl( L, f, sizeof( int ), MXINT ); break;
+			case 'I': t = T_PCK_UNT;   m = (1==*e);   s = gnl( L, f, sizeof( int ), MXINT ); break;
+
+			// Float types
+			case 'f': t = T_PCK_FLT;   m = (1==*e);   s = sizeof( float );                   break;
+			case 'd': t = T_PCK_FLT;   m = (1==*e);   s = sizeof( double );                  break;
+			case 'n': t = T_PCK_FLT;   m = (1==*e);   s = sizeof( lua_Number );              break;
+
+			// String type
+			case 'c': t = T_PCK_RAW;   m = 0;         s = gnl( L, f, 1, 0x1 << NB );         break;
+
+			// Bit types
+			case 'v':
+				t = T_PCK_BOL;
+				m = gnl(L, f, 1+(*bo%NB), NB) - 1;
+				s = 1;
+				break;
+			case 'r':
+				t = T_PCK_BTS;
+				m = *bo % NB;
+				s = gnl(L, f, 1, MXBIT );
+				break;
+			case 'R':
+				t = T_PCK_BTU;
+				m = *bo % NB;
+				s = gnl(L, f, 1, MXBIT );
+				break;
+
+			// modifier types
+			case '<': *e = 1; continue;                                                      break;
+			case '>': *e = 0; continue;                                                      break;
+			case '\0': return NULL;                                                          break;
+			default:
+				luaL_error( L, "invalid format option '%c'", opt );
+				return NULL;
+		}
+		// TODO: check if 0==offset%8 if byte type, else error
+		p    = t_pck_create_ud( L, t, s, m );
+		// forward the Bit offset
+		*bo += ((T_PCK_BTU==t || T_PCK_BTS==t || T_PCK_BOL==t) ? s : s*NB);
+	}
+	return p;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 // Function helpers
@@ -58,9 +188,9 @@ static struct t_pck *t_pck_mksequence( lua_State *L, int sp, int ep, size_t *bo 
  * \param   islittle  treat input as little endian?
  * --------------------------------------------------------------------------*/
 static void
-t_pck_cbytes( unsigned char * dst, const unsigned char * src, size_t sz, int islittle )
+t_pck_cbytes( unsigned char * dst, const unsigned char * src, size_t sz, int is_little )
 {
-	if (IS_LITTLE_ENDIAN == islittle)
+	if (IS_LITTLE_ENDIAN == is_little)
 		while (sz-- != 0)
 			*(dst++) = *(src+sz);
 	else
@@ -90,24 +220,24 @@ t_pck_wbits( lua_Unsigned val, size_t len, size_t ofs, unsigned char * buf )
 
 	msk = (-1 << (MXBIT-len)) >> (MXBIT-abit+ofs);
 #ifdef IS_LITTLE_ENDIAN
-	t_pck_cbytes( (unsigned char *) &set, buf, abyt, 1);
+	t_pck_cbytes( (unsigned char *) &set, buf, abyt, BIG_ENDIAN);
 #else
-	t_pck_cbytes( 
+	t_pck_cbytes(
 	   (unsigned char *) &set + sizeof( lua_Unsigned) - abyt,
 	   buf,
 		abyt,
-		0 );
+		LITTLE_ENDIAN );
 #endif
 	// isolate the value and merge with pre-existing bits
 	set = (val << (abit-ofs-len)) | (set & ~msk);
 #ifdef IS_LITTLE_ENDIAN
-	t_pck_cbytes( buf, (unsigned char *) &set, abyt, 1);
+	t_pck_cbytes( buf, (unsigned char *) &set, abyt, LITTLE_ENDIAN );
 #else
-	t_pck_cbytes( 
+	t_pck_cbytes(
 	   buf,
 	   (unsigned char *) &set + sizeof( lua_Unsigned) - abyt,
-		abyt,
-		0 );
+	   abyt,
+	   BIG_ENDIAN );
 #endif
 
 #if PRINT_DEBUGS == 1
@@ -149,11 +279,11 @@ t_pck_read( lua_State *L, struct t_pck *p, const unsigned char *b )
 #ifdef IS_LITTLE_ENDIAN
 			t_pck_cbytes( (unsigned char *) &val, b, p->s, ! p->m );
 #else
-			t_pck_cbytes( 
+			t_pck_cbytes(
 			   (unsigned char *) &val + sizeof( lua_Unsigned) - p->s,
 			   b,
-				p->s,
-				p->m );
+			   p->s,
+			   p->m );
 #endif
 			msk = (lua_Unsigned) 1  << (p->s*NB - 1);
 			lua_pushinteger( L, (lua_Integer) ((val ^ msk) - msk) );
@@ -166,11 +296,11 @@ t_pck_read( lua_State *L, struct t_pck *p, const unsigned char *b )
 #ifdef IS_LITTLE_ENDIAN
 				t_pck_cbytes( (unsigned char *) &val, b, p->s, ! p->m );
 #else
-				t_pck_cbytes( 
+				t_pck_cbytes(
 				   (unsigned char *) &val + sizeof( lua_Unsigned) - p->s,
 				   b,
-					p->s,
-					p->m );
+				   p->s,
+				   p->m );
 #endif
 				lua_pushinteger( L, (lua_Integer) val );
 			}
@@ -186,13 +316,13 @@ t_pck_read( lua_State *L, struct t_pck *p, const unsigned char *b )
 				msk = (lua_Unsigned) 1  << (p->s - 1);
 				// copy as many bytes as needed
 #ifdef IS_LITTLE_ENDIAN
-				t_pck_cbytes( (unsigned char *) &val, b, (p->s+p->m-1)/8 + 1, 1 );
+				t_pck_cbytes( (unsigned char *) &val, b, (p->s+p->m-1)/8 + 1, LITTLE_ENDIAN );
 #else
-				t_pck_cbytes( 
+				t_pck_cbytes(
 				   (unsigned char *) &val + sizeof( lua_Unsigned) - (p->s+p->m-1)/8 + 1,
 				   b,
-					(p->s+p->m-1)/8 + 1,
-					0 );
+				   (p->s+p->m-1)/8 + 1,
+				   BIG_ENDIAN );
 #endif
 				val = (val << (MXBIT- ((p->s/NB+1)*NB) + p->m ) ) >> (MXBIT - p->s);
 				lua_pushinteger( L, (lua_Integer) ((val ^ msk) - msk) );
@@ -205,20 +335,20 @@ t_pck_read( lua_State *L, struct t_pck *p, const unsigned char *b )
 			{
 				// copy as many bytes as needed
 #ifdef IS_LITTLE_ENDIAN
-				t_pck_cbytes( (unsigned char *) &val, b, (p->s+p->m-1)/8 + 1, 1 );
+				t_pck_cbytes( (unsigned char *) &val, b, (p->s+p->m-1)/8 + 1, LITTLE_ENDIAN );
 #else
-				t_pck_cbytes( 
+				t_pck_cbytes(
 				   (unsigned char *) &val + sizeof( lua_Unsigned) - (p->s+p->m-1)/8 + 1,
 				   b,
-					(p->s+p->m-1)/8 + 1,
-					0 );
+				   (p->s+p->m-1)/8 + 1,
+				   BIG_ENDIAN );
 #endif
 				val = (val << (MXBIT- ((p->s/NB+1)*NB) + p->m ) ) >> (MXBIT - p->s);
 				lua_pushinteger( L, (lua_Integer) val );
 			}
 			break;
 		case T_PCK_FLT:
-			t_pck_cbytes( (unsigned char*) &(u), b, p->s, 0 );
+			t_pck_cbytes( (unsigned char*) &(u), b, p->s, BIG_ENDIAN );
 			if      (sizeof( u.f ) == p->s) lua_pushnumber( L, (lua_Number) u.f );
 			else if (sizeof( u.d ) == p->s) lua_pushnumber( L, (lua_Number) u.d );
 			else                            lua_pushnumber( L, u.n );
@@ -234,7 +364,7 @@ t_pck_read( lua_State *L, struct t_pck *p, const unsigned char *b )
 
 
 /**--------------------------------------------------------------------------
- * Sets a value from stack to a char buffer according to paccker format.
+ * Sets a value from stack to a char buffer according to packer format.
  * \param  L lua Virtual Machine.
  * \param  struct t_pack.
  * \param  unsigned char* char buffer to write to.
@@ -325,7 +455,7 @@ t_pck_write( lua_State *L, struct t_pck *p, unsigned char *b )
 			if      (sizeof( u.f ) == p->s) u.f = (float)  luaL_checknumber( L, -1 );
 			else if (sizeof( u.d ) == p->s) u.d = (double) luaL_checknumber( L, -1 );
 			else                            u.n = luaL_checknumber( L, -1 );
-			t_pck_cbytes( b, (unsigned char*) &(u), p->s, 0 );
+			t_pck_cbytes( b, (unsigned char*) &(u), p->s, BIG_ENDIAN );
 			break;
 		case T_PCK_RAW:
 			strVal = luaL_checklstring( L, -1, &sL );
@@ -353,7 +483,7 @@ t_pck_write( lua_State *L, struct t_pck *p, unsigned char *b )
  * \param   t_pack    the packer instance struct.
  * \lreturn  leaves two strings on the Lua Stack.
  * --------------------------------------------------------------------------*/
-void
+static void
 t_pck_format( lua_State *L, enum t_pck_t t, size_t s, int m )
 {
 	lua_pushfstring( L, "%s", t_pck_t_lst[ t ] );
@@ -391,7 +521,7 @@ t_pck_format( lua_State *L, enum t_pck_t t, size_t s, int m )
  * See if requested type exists in T.Pack. otherwise create and register.
  * the format for a particular definition will never change. Hence, no need to
  * create them over and over again.  This approach saves memory.
- * \param     L  lua state.
+ * \param     L  Lua state.
  * \param     enum   t_pck_t.
  * \param     size   number of elements.
  * \param     mod parameter.
@@ -509,140 +639,6 @@ t_pck_getsize( lua_State *L,  struct t_pck *p, int bits )
 }
 
 
-// ###########################################################################
-//                                HELPERS adapted from Lua 5.3 Source
-/** -------------------------------------------------------------------------
- * See if int represents a character which is a digit.
- * \param     int c
- * \return    boolean 0:flase - 1:true
- *  -------------------------------------------------------------------------*/
-static int
-is_digit( int c ) { return '0' <= c && c<='9'; }
-
-
-/** -------------------------------------------------------------------------
- * reads from string until input is not numeric any more.
- * \param     char** format string
- * \param     int    default value
- * \return    int    read numeric value
- *  -------------------------------------------------------------------------*/
-static int
-gn( const char **fmt, int df )
-{
-	if (! is_digit(** fmt))    // no number
-		return df;
-	else
-	{
-		int a=0;
-		do
-		{
-			a = a*10+ *((*fmt)++) - '0';
-		} while (is_digit(**fmt) &&  a <(INT_MAX/10 - 10));
-		return a;
-	}
-}
-
-
-/** -------------------------------------------------------------------------
- * Read an integer from the format parser
- * raises an error if it is larger than the maximum size for integers.
- * \param  char* format string
- * \param  int   default value if no number is in the format string
- * \param  int   max value allowed for int
- * \return the converted integer value
- *  -------------------------------------------------------------------------*/
-static int
-gnl( lua_State *L, const char **fmt, int df, int max )
-{
-	int sz = gn( fmt, df );
-	if (sz > max || sz <= 0)
-		luaL_error( L, "size (%d) out of limits [1,%d]", sz, max );
-	return sz;
-}
-
-
-/** -------------------------------------------------------------------------
- * Determines type of Packer from format string.
- * Returns the Packer, or NULL if unsuccessful.
- * \param     L  lua state.
- * \param     char*  format string pointer. moved by this function.
- * \param     int*   e pointer to current endianess.
- * \param     int*   bo pointer to current bit offset within byte.
- * \return    struct t_pck* pointer.
- * TODO: Deal with bit sized Packers:
- *       - Detect if we are in Bit sized type(o%8 !=0)
- *       - Detect if fmt switched back to byte style and ERROR
- *  -------------------------------------------------------------------------*/
-struct t_pck
-*t_pck_getoption( lua_State *L, const char **f, int *e, size_t *bo )
-{
-	int           opt;
-	int           m;
-	size_t        s;
-	enum t_pck_t  t;
-	struct t_pck *p   = NULL;
-
-	while (NULL == p)
-	{
-		opt = *((*f)++);
-		//printf("'%c'   %02X\n", opt, opt);
-		switch (opt)
-		{
-			// Integer types
-			case 'b': t = T_PCK_INT;   m = (1==*e);   s = 1;                                 break;
-			case 'B': t = T_PCK_UNT;   m = (1==*e);   s = 1;                                 break;
-			case 'h': t = T_PCK_INT;   m = (1==*e);   s = sizeof( short );                   break;
-			case 'H': t = T_PCK_UNT;   m = (1==*e);   s = sizeof( short );                   break;
-			case 'l': t = T_PCK_INT;   m = (1==*e);   s = sizeof( long );                    break;
-			case 'L': t = T_PCK_UNT;   m = (1==*e);   s = sizeof( long );                    break;
-			case 'j': t = T_PCK_INT;   m = (1==*e);   s = sizeof( lua_Integer );             break;
-			case 'J': t = T_PCK_UNT;   m = (1==*e);   s = sizeof( lua_Integer );             break;
-			case 'T': t = T_PCK_INT;   m = (1==*e);   s = sizeof( size_t );                  break;
-			case 'i': t = T_PCK_INT;   m = (1==*e);   s = gnl( L, f, sizeof( int ), MXINT ); break;
-			case 'I': t = T_PCK_UNT;   m = (1==*e);   s = gnl( L, f, sizeof( int ), MXINT ); break;
-
-			// Float types
-			case 'f': t = T_PCK_FLT;   m = (1==*e);   s = sizeof( float );                   break;
-			case 'd': t = T_PCK_FLT;   m = (1==*e);   s = sizeof( double );                  break;
-			case 'n': t = T_PCK_FLT;   m = (1==*e);   s = sizeof( lua_Number );              break;
-
-			// String type
-			case 'c': t = T_PCK_RAW;   m = 0;         s = gnl( L, f, 1, 0x1 << NB );         break;
-
-			// Bit types
-			case 'v':
-				t = T_PCK_BOL;
-				m = gnl(L, f, 1+(*bo%NB), NB) - 1;
-				s = 1;
-				break;
-			case 'r':
-				t = T_PCK_BTS;
-				m = *bo % NB;
-				s = gnl(L, f, 1, MXBIT );
-				break;
-			case 'R':
-				t = T_PCK_BTU;
-				m = *bo % NB;
-				s = gnl(L, f, 1, MXBIT );
-				break;
-
-			// modifier types
-			case '<': *e = 1; continue;                                                      break;
-			case '>': *e = 0; continue;                                                      break;
-			case '\0': return NULL;                                                          break;
-			default:
-				luaL_error( L, "invalid format option '%c'", opt );
-				return NULL;
-		}
-		// TODO: check if 0==offset%8 if byte type, else error
-		p    = t_pck_create_ud( L, t, s, m );
-		// forward the Bit offset
-		*bo += ((T_PCK_BTU==t || T_PCK_BTS==t || T_PCK_BOL == t) ? s : s*NB);
-	}
-	return p;
-}
-
-
 /**--------------------------------------------------------------------------
  * Get T.Pack from a stack element.
  * Return Reader Pointer if requested.
@@ -692,7 +688,7 @@ struct t_pck
 {
 	struct t_pck *p = NULL; ///< packer
 	int           l = _default_endian;
-	int           n = 0;  ///< counter for packers created from fmt string
+	int           n = 0;    ///< counter for packers created from fmt string
 	int           t = lua_gettop( L );  ///< top of stack before operations
 	const char   *fmt;
 
@@ -714,14 +710,14 @@ struct t_pck
 	else // if it is a format string
 	{
 		fmt = luaL_checkstring( L, pos );
-		p   = t_pck_getoption( L, &fmt, &l, bo );
-		while (NULL != p )
+		p   = t_pck_get_packer_definition_from_string( L, &fmt, &l, bo );
+		while (NULL != p ) // add packers on stack
 		{
 			n++;
-			p   = t_pck_getoption( L, &fmt, &l, bo );
+			p   = t_pck_get_packer_definition_from_string( L, &fmt, &l, bo );
 		}
 		// TODO: actually create the packers and calculate positions
-		if (1 < n)
+		if (n > 1)
 		{
 			p =  t_pck_mksequence( L, t+1, lua_gettop( L ), bo );
 		}
@@ -869,7 +865,7 @@ static struct t_pck
 //  \____\___/|_| |_|___/\__|_|   \__,_|\___|\__\___/|_|
 //###########################################################################
 /** -------------------------------------------------------------------------
- * Creates a packerfrom the function call.
+ * Creates a packer from the function call.
  * \param     L  lua state.
  * \lparam    fmt    string.
  *      or
@@ -896,7 +892,7 @@ lt_pck_New( lua_State *L )
 		p = t_pck_mkarray( L );
 		return 1;
 	}
-	// Handle everyting else ->Struct
+	// Handle everyting else -> Struct
 	if (LUA_TTABLE == lua_type( L, -1 ))
 	{
 		p = t_pck_mkstruct( L, 1, lua_gettop( L ) );

@@ -5,34 +5,43 @@
 # \author    tkieslich
 # \copyright See Copyright notice at the end of t.h
 
-T_SRC=t_tim.c
+T_SRC=t_tim.c \
+		t_pck.c
 
+
+#Create a Makefile in the out folcder and invoke there
 #
 LVER=5.3
 PREFIX=$(shell pkg-config --variable=prefix lua)
 INCDIR=$(shell pkg-config --variable=includedir lua)
-INCS=-I$(INCDIR) -I../
+INCS=-I$(INCDIR) -I../ -I./
 LDFLAGS:=$(LDFLAGS) -lcrypt
 # clang can be substituted with gcc (command line args compatible)
 CC=clang
 LD=clang
-CFLAGS:=-Wall -Wextra -O0 -std=c99 -fpic $(MYCFLAGS) $(T_PRE)
+CFLAGS:=$(MYCFLAGS) -Wall -Wextra -O0 -std=c99 -fpic $(T_PRE)
 
+T_PFX=$(addprefix test_, $(T_SRC))
 T_OBJ=$(T_SRC:.c=.o)
 T_EXE=$(T_SRC:.c=)
 
-all: $(T_SRC) $(T_OBJ) t_unittest.o $(T_EXE)
-	$(foreach exe,$(T_EXE),./$(exe);)
+all: $(T_SRC) $(T_PFX) $(T_OBJ) t_unittest.o $(T_EXE)
+#	$(foreach exe,$(T_EXE),./$(exe);)
 
-%.o: %.c
-	cat ../$<  $< | $(CC) -x c $(INCS) $(CFLAGS) -c - -o $@
+test_%.c : %.c
+	cat ../$<  $< > $@
+
+%.o: test_%.c
+	$(CC) -x c $(INCS) $(CFLAGS) -c $< -o $@
 
 %: %.o
-	$(LD) t_unittest.o $< -o $@ $(LDFLAGS) $(LIBS)
+	mv ../$< ../$<.bak
+	$(LD) t_unittest.o ../*o $< -o $@ $(LDFLAGS) $(LIBS)
+	mv ../$<.bak ../$<
 
-t_unittest.o: t_unittest.c
+_unittest.o: t_unittest.c
 	$(CC) $(CFLAGS) -c t_unittest.c -o t_unittest.o
 
 
 clean:
-	-rm $(T_OBJ) $(T_EXE) t_unittest.o
+	-rm $(T_PFX) $(T_OBJ) $(T_EXE) t_unittest.o

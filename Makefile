@@ -35,7 +35,7 @@ install: $(SRCDIR)/$(T_LIB_DYN)
 	$(MAKE) -C $(SRCDIR) CC=$(CC) LD=$(LD) \
 		T_LIB_DYN="$(T_LIB_DYN)" T_LIB_STA="$(T_LIB_STA)" \
 		LVER=$(LVER) \
-		MYCFLAGS=$(MYCFLAGS) \
+		MYCFLAGS="$(MYCFLAGS)" \
 		LDFLAGS="$(LDFLAGS)" \
 		INCS=$(INCDIR) \
 		PREFIX="$(PREFIX)" install
@@ -43,7 +43,7 @@ install: $(SRCDIR)/$(T_LIB_DYN)
 test: $(SRCDIR)
 	$(MAKE) -C $(SRCDIR) CC=$(CC) LD=$(LD) \
 		LVER=$(LVER) \
-		MYCFLAGS=$(MYCFLAGS) \
+		MYCFLAGS="$(MYCFLAGS)" \
 		LDFLAGS="$(LDFLAGS)" \
 		INCDIR=$(INCDIR) test
 

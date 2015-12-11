@@ -21,6 +21,7 @@ T_SRC=t.c \
 	 t_enc_crc.c \
 	 t_enc_b64.c \
 	 t_buf.c \
+	 t_pck_parser.c \
 	 t_pck.c \
 	 t_wsk.c \
 	 t_tst.c \
@@ -70,7 +71,7 @@ install: $(T_SRC) $(T_LIB_DYN) $(T_LIB_STA)
 test: $(SRCDIR)
 	$(MAKE) -C test CC=$(CC) LD=$(LD) \
 		LVER=$(LVER) \
-		MYCFLAGS=$(MYCFLAGS) \
+		MYCFLAGS="$(MYCFLAGS)" \
 		LDFLAGS="$(LDFLAGS)" \
 		INCDIR=$(INCDIR)
 
